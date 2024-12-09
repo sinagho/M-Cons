@@ -1,3 +1,5 @@
+import numbers
+import math
 import torch
 import torch.nn as nn
 from einops import rearrange
@@ -289,6 +291,195 @@ class DualTransformerBlock(nn.Module):
         return mx
 
 
+class Attention_st(nn.Module):
+    def __init__(self, dim, num_heads, bias):
+        super(Attention_st, self).__init__()
+        self.num_heads = num_heads
+        self.temperature = nn.Parameter(torch.ones(num_heads, 1, 1))
+
+        self.qkv = nn.Conv2d(dim, dim*3, kernel_size=1, bias=bias)
+        self.qkv_dwconv = nn.Conv2d(dim*3, dim*3, kernel_size=3, stride=1, padding=1, groups=dim*3, bias=bias)
+        self.project_out = nn.Conv2d(dim, dim, kernel_size=1, bias=bias)
+        
+
+
+    def forward(self, x):
+        b,c,h,w = x.shape
+
+        qkv = self.qkv_dwconv(self.qkv(x))
+        q,k,v = qkv.chunk(3, dim=1)   
+
+
+
+        
+        q = rearrange(q, 'b (head c) h w -> b head c (h w)', head=self.num_heads)
+        k = rearrange(k, 'b (head c) h w -> b head c (h w)', head=self.num_heads)
+        v = rearrange(v, 'b (head c) h w -> b head c (h w)', head=self.num_heads)
+
+        q = torch.nn.functional.normalize(q, dim=-1)
+        k = torch.nn.functional.normalize(k, dim=-1)
+
+        attn = (q @ k.transpose(-2, -1)) * self.temperature
+        attn = attn.softmax(dim=-1)
+
+        out = (attn @ v)
+        
+        out = rearrange(out, 'b head c (h w) -> b (head c) h w', head=self.num_heads, h=h, w=w)
+
+        out = self.project_out(out)
+        return out
+
+## Multi-DConv Head Transposed Self-Attention (MDTA)
+class Attention_st_cross(nn.Module):
+    def __init__(self, dim, num_heads, bias):
+        dim = dim //2
+        super(Attention_st_cross, self).__init__()
+        self.num_heads = num_heads
+        self.temperature = nn.Parameter(torch.ones(num_heads, 1, 1))
+
+        self.kv = nn.Conv2d(dim, 2*dim*2, kernel_size=1, bias=bias)
+        self.q = nn.Conv2d(dim, 2*dim, kernel_size=1, bias=bias)
+        self.kv_dwconv = nn.Conv2d(2*dim*2, 2*dim*2, kernel_size=3, stride=1, padding=1, groups=dim*2, bias=bias)
+        self.project_out = nn.Conv2d(2*dim, 2*dim, kernel_size=1, bias=bias)
+        
+
+    def forward(self, x):
+        b,c,h,w = x.shape
+
+        kv = self.kv_dwconv(self.kv(x[:, :c//2]))
+        k,v = kv.chunk(2, dim=1)   
+        q = self.q(x[:, :c//2])
+
+        q = rearrange(q, 'b (head c) h w -> b head c (h w)', head=self.num_heads)
+        k = rearrange(k, 'b (head c) h w -> b head c (h w)', head=self.num_heads)
+        v = rearrange(v, 'b (head c) h w -> b head c (h w)', head=self.num_heads)
+
+        q = torch.nn.functional.normalize(q, dim=-1)
+        k = torch.nn.functional.normalize(k, dim=-1)
+
+        attn = (q @ k.transpose(-2, -1)) * self.temperature
+        attn = attn.softmax(dim=-1)
+
+        out = (attn @ v)
+        
+        out = rearrange(out, 'b head c (h w) -> b (head c) h w', head=self.num_heads, h=h, w=w)
+
+        out = self.project_out(out)
+        return out
+
+class WithBias_LayerNorm(nn.Module):
+    def __init__(self, normalized_shape):
+        super(WithBias_LayerNorm, self).__init__()
+        if isinstance(normalized_shape, numbers.Integral):
+            normalized_shape = (normalized_shape,)
+        normalized_shape = torch.Size(normalized_shape)
+
+        assert len(normalized_shape) == 1
+
+        self.weight = nn.Parameter(torch.ones(normalized_shape))
+        self.bias = nn.Parameter(torch.zeros(normalized_shape))
+        self.normalized_shape = normalized_shape
+
+    def forward(self, x):
+        mu = x.mean(-1, keepdim=True)
+        sigma = x.var(-1, keepdim=True, unbiased=False)
+        return (x - mu) / torch.sqrt(sigma+1e-5) * self.weight + self.bias
+
+
+
+def to_3d(x):
+    return rearrange(x, 'b c h w -> b (h w) c')
+
+def to_4d(x,h,w):
+    return rearrange(x, 'b (h w) c -> b c h w',h=h,w=w)
+
+class LayerNormst(nn.Module):
+    def __init__(self, dim, LayerNorm_type):
+        super(LayerNormst, self).__init__()
+        if LayerNorm_type =='BiasFree':
+            self.body = BiasFree_LayerNorm(dim)
+        else:
+            self.body = WithBias_LayerNorm(dim)
+
+    def forward(self, x):
+        h, w = x.shape[-2:]
+        return to_4d(self.body(to_3d(x)), h, w)
+    
+class FeedForward(nn.Module):
+    def __init__(self, dim, ffn_expansion_factor, bias):
+        super(FeedForward, self).__init__()
+
+        hidden_features = int(dim*ffn_expansion_factor)
+
+        self.project_in = nn.Conv2d(dim, hidden_features*2, kernel_size=1, bias=bias)
+
+        self.dwconv = nn.Conv2d(hidden_features*2, hidden_features*2, kernel_size=3, stride=1, padding=1, groups=hidden_features*2, bias=bias)
+
+        self.project_out = nn.Conv2d(hidden_features, dim, kernel_size=1, bias=bias)
+
+    def forward(self, x):
+        x = self.project_in(x)
+        x1, x2 = self.dwconv(x).chunk(2, dim=1)
+        x = F.gelu(x1) * x2
+        x = self.project_out(x)
+        return x
+    
+class TransformerBlock(nn.Module):
+    def __init__(self, dim, num_heads, ffn_expansion_factor, bias, LayerNorm_type, cross= False):
+        super(TransformerBlock, self).__init__()
+
+        self.norm1 = LayerNormst(dim, LayerNorm_type)
+        if not cross:
+            self.attn = Attention_st(dim, num_heads, bias)
+        else:
+            self.attn = Attention_st_cross(dim, num_heads, bias)
+        self.norm2 = LayerNormst(dim, LayerNorm_type)
+        self.ffn = FeedForward(dim, ffn_expansion_factor, bias)
+
+    def forward(self, x):
+        x = x + self.attn(self.norm1(x))
+        x = x + self.ffn(self.norm2(x))
+
+        return x
+
+
+class LightWeightPromptGenBlock(nn.Module):
+    def __init__(self,input_size, prompt_dim=48, prompt_len=5 ,lin_dim = 192):
+        super().__init__()
+
+        self.prompt_param = nn.Parameter(torch.rand(1,prompt_len,prompt_dim, input_size, input_size)) # B, N , C, H, W
+        
+        self.linear_layer = nn.Linear(lin_dim,prompt_len)
+
+        self.conv3x3 = nn.Conv2d(prompt_dim,prompt_dim,kernel_size=3,stride=1,padding=1,bias=False)
+        
+
+    def forward(self,x):
+        B,C,H,W = x.shape
+        emb = x.mean(dim=(-2,-1)) # B, C
+        #print(emb.shape)
+
+        prompt_weights = F.softmax(self.linear_layer(emb),dim=1) # B, C , C = 5
+        #print(prompt_weights.shape)
+
+        #prompt_ = prompt_weights.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
+        #print(prompt_.shape)
+        
+        prompt = prompt_weights.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1) * self.prompt_param.unsqueeze(0).repeat(B,1,1,1,1,1).squeeze(1)
+        #print(prompt.shape)
+
+        #prompt__ = self.prompt_param.unsqueeze(0).repeat(B,1,1,1,1,1).squeeze(1)
+        #print(prompt__.shape)
+        
+        prompt = torch.sum(prompt,dim=1)
+        #print(prompt.shape)
+        prompt = F.interpolate(prompt,(H,W),mode="bilinear")
+        prompt = self.conv3x3(prompt)
+        
+
+        return prompt
+    
+
 ##########################################
 #
 #         General Decoder Blocks
@@ -436,6 +627,119 @@ class MyDecoderLayerLKA(nn.Module):
             tran_layer_1 = self.layer_lka_1(cat_linear_x)
             # print(tran_layer_1.shape)
             tran_layer_2 = self.layer_lka_2(tran_layer_1)
+
+            tran_layer_2 = tran_layer_2.view(tran_layer_2.size(0), tran_layer_2.size(3) * tran_layer_2.size(2),
+                                             tran_layer_2.size(1))
+            if self.last_layer:
+                out = self.last_layer(
+                    self.layer_up(tran_layer_2).view(b2, 4 * h2, 4 * w2, -1).permute(0, 3, 1, 2))  # 1 9 224 224
+            else:
+                out = self.layer_up(tran_layer_2)  # 1 3136 160
+        else:
+            out = self.layer_up(x1)
+        return out
+
+
+class MyDecoderLayerLKAPrompt(nn.Module):
+    def __init__(
+            self, input_size: tuple, in_out_chan: tuple, n_class=9,
+            norm_layer=nn.LayerNorm, is_last=False
+    ):
+        super().__init__()
+        out_dim = in_out_chan[0]
+        x1_dim = in_out_chan[1]
+        # prompt_ratio = prompt_ratio
+        
+        if not is_last:
+            self.x1_linear = nn.Linear(x1_dim, out_dim)
+            #self.ag_attn = MultiScaleGatedAttn(dim=x1_dim)
+            self.ag_attn_norm = nn.LayerNorm(out_dim)
+
+            self.layer_up = PatchExpand(input_resolution=input_size, dim=out_dim, dim_scale=2, norm_layer=norm_layer)
+            self.last_layer = None
+        else:
+            self.x1_linear = nn.Linear(x1_dim, out_dim)
+            #self.ag_attn = MultiScaleGatedAttn(dim=x1_dim)
+            self.ag_attn_norm = nn.LayerNorm(out_dim)
+
+            self.layer_up = FinalPatchExpand_X4(
+                input_resolution=input_size, dim=out_dim, dim_scale=4, norm_layer=norm_layer
+            )
+            self.last_layer = nn.Conv2d(out_dim, n_class, 1)
+
+        
+        self.layer_lka_1 = LKABlock(dim=out_dim)
+        ## Prompt Module must be located here.
+
+        #dim_p = int(out_dim * 0.75)
+        dim_p = out_dim
+        self.prompt1 = LightWeightPromptGenBlock(prompt_dim=dim_p,
+                                                 input_size= input_size[0],
+                                                 prompt_len = 5,
+                                                 lin_dim= dim_p)
+        
+        self.noise_level1 = TransformerBlock(dim=int(dim_p*2**1) ,
+                                             num_heads=1, 
+                                             ffn_expansion_factor=2.66, 
+                                             bias=False, LayerNorm_type='WithBias')
+        
+        self.reduce_noise_level1 = nn.Conv2d(int(dim_p*2),int(dim_p*1),kernel_size=1,bias=False)
+
+
+
+        self.layer_lka_2 = LKABlock(dim=out_dim)
+
+        
+
+        def init_weights(self):
+            for m in self.modules():
+                if isinstance(m, nn.Linear):
+                    nn.init.xavier_uniform_(m.weight)
+                    if m.bias is not None:
+                        nn.init.zeros_(m.bias)
+                elif isinstance(m, nn.LayerNorm):
+                    nn.init.ones_(m.weight)
+                    nn.init.zeros_(m.bias)
+                elif isinstance(m, nn.Conv2d):
+                    nn.init.xavier_uniform_(m.weight)
+                    if m.bias is not None:
+                        nn.init.zeros_(m.bias)
+
+        init_weights(self)
+
+    def forward(self, x1, x2=None):
+        if x2 is not None:  # skip connection exist
+            x2 = x2.contiguous()
+            # b, c, h, w = x1.shape
+            b2, h2, w2, c2 = x2.shape  # e.g: 1 28 28 320, 1 56 56 128
+            x2 = x2.view(b2, -1, c2)  # e.g: 1 784 320, 1 3136 128
+
+            x1_expand = self.x1_linear(x1)  # e.g: 1 784 256 --> 1 784 320, 1 3136 160 --> 1 3136 128
+
+            x2_new = x2.view(x2.size(0), x2.size(2), x2.size(1) // w2, x2.size(1) // h2) # B, C, H, W
+            
+
+            x1_expand = x1_expand.view(x2.size(0), x2.size(2), x2.size(1) // w2, x2.size(1) // h2) # B, C, H, W
+
+            # print(f'the x1_expand shape is: {x1_expand.shape}\n\t the x2_new shape is: {x2_new.shape}')
+
+            #attn_gate = self.ag_attn(x=x2_new, g=x1_expand)  # B C H W
+
+            cat_linear_x = x1_expand + x2_new  # B C H W
+            cat_linear_x = cat_linear_x.permute(0, 2, 3, 1)  # B H W C
+            cat_linear_x = self.ag_attn_norm(cat_linear_x)  # B H W C
+
+            cat_linear_x = cat_linear_x.permute(0, 3, 1, 2).contiguous()  # B C H W
+
+            tran_layer_1 = self.layer_lka_1(cat_linear_x)
+            
+            prompt_layer_1 = self.prompt1(tran_layer_1)
+            
+            cat_input_prompt = torch.cat([tran_layer_1, prompt_layer_1], dim= 1)
+            cat_input_prompt = self.noise_level1(cat_input_prompt)
+            refined_feature = self.reduce_noise_level1(cat_input_prompt)
+
+            tran_layer_2 = self.layer_lka_2(refined_feature)
 
             tran_layer_2 = tran_layer_2.view(tran_layer_2.size(0), tran_layer_2.size(3) * tran_layer_2.size(2),
                                              tran_layer_2.size(1))
@@ -716,22 +1020,22 @@ class Msa2Net_V2(nn.Module):
         ]  # [dim, out_dim, key_dim, value_dim, x2_dim]
 
 
-        self.decoder_3 = MyDecoderLayerLKA(
+        self.decoder_3 = MyDecoderLayerLKAPrompt(
             (d_base_feat_size, d_base_feat_size),
             in_out_chan[3],
             n_class=num_classes)
 
-        self.decoder_2 = MyDecoderLayerLKA(
+        self.decoder_2 = MyDecoderLayerLKAPrompt(
             (d_base_feat_size * 2, d_base_feat_size * 2),
             in_out_chan[2],
             n_class=num_classes)
         
-        self.decoder_1 = MyDecoderLayerLKA(
+        self.decoder_1 = MyDecoderLayerLKAPrompt(
             (d_base_feat_size * 4, d_base_feat_size * 4),
             in_out_chan[1],
             n_class=num_classes)
         
-        self.decoder_0 = MyDecoderLayerLKA(
+        self.decoder_0 = MyDecoderLayerLKAPrompt(
             (d_base_feat_size * 8, d_base_feat_size * 8),
             in_out_chan[0],
             n_class=num_classes,
