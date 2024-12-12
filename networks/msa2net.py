@@ -643,11 +643,12 @@ class MyDecoderLayerLKA(nn.Module):
 class MyDecoderLayerLKAPrompt(nn.Module):
     def __init__(
             self, input_size: tuple, in_out_chan: tuple, n_class=9,
-            norm_layer=nn.LayerNorm, is_last=False
+            norm_layer=nn.LayerNorm, is_last=False, decoder_prompt = False
     ):
         super().__init__()
         out_dim = in_out_chan[0]
         x1_dim = in_out_chan[1]
+        self.decoder_prompt = decoder_prompt
         # prompt_ratio = prompt_ratio
         
         if not is_last:
@@ -672,24 +673,21 @@ class MyDecoderLayerLKAPrompt(nn.Module):
         ## Prompt Module must be located here.
 
         #dim_p = int(out_dim * 0.75)
-        dim_p = out_dim
-        self.prompt1 = LightWeightPromptGenBlock(prompt_dim=dim_p,
+        if decoder_prompt: 
+            dim_p = out_dim
+            self.prompt1 = LightWeightPromptGenBlock(prompt_dim=dim_p,
                                                  input_size= input_size[0],
                                                  prompt_len = 5,
                                                  lin_dim= dim_p)
         
-        self.noise_level1 = TransformerBlock(dim=int(dim_p*2**1) ,
+            self.noise_level1 = TransformerBlock(dim=int(dim_p*2**1) ,
                                              num_heads=1, 
                                              ffn_expansion_factor=2.66, 
                                              bias=False, LayerNorm_type='WithBias')
         
-        self.reduce_noise_level1 = nn.Conv2d(int(dim_p*2),int(dim_p*1),kernel_size=1,bias=False)
-
-
+            self.reduce_noise_level1 = nn.Conv2d(int(dim_p*2),int(dim_p*1),kernel_size=1,bias=False)
 
         self.layer_lka_2 = LKABlock(dim=out_dim)
-
-        
 
         def init_weights(self):
             for m in self.modules():
@@ -723,27 +721,27 @@ class MyDecoderLayerLKAPrompt(nn.Module):
 
             # print(f'the x1_expand shape is: {x1_expand.shape}\n\t the x2_new shape is: {x2_new.shape}')
 
-            #attn_gate = self.ag_attn(x=x2_new, g=x1_expand)  # B C H W
-
             cat_linear_x = x1_expand + x2_new  # B C H W
             cat_linear_x = cat_linear_x.permute(0, 2, 3, 1)  # B H W C
             cat_linear_x = self.ag_attn_norm(cat_linear_x)  # B H W C
 
             cat_linear_x = cat_linear_x.permute(0, 3, 1, 2).contiguous()  # B C H W
 
-            tran_layer_1 = self.layer_lka_1(cat_linear_x)
+            refined_feature = self.layer_lka_1(cat_linear_x)
             
-            prompt_layer_1 = self.prompt1(tran_layer_1)
             
-            cat_input_prompt = torch.cat([tran_layer_1, prompt_layer_1], dim= 1)
-            cat_input_prompt = self.noise_level1(cat_input_prompt)
-            refined_feature = self.reduce_noise_level1(cat_input_prompt)
+            if self.decoder_prompt:
+                prompt_layer_1 = self.prompt1(refined_feature)
+                cat_input_prompt = torch.cat([refined_feature, prompt_layer_1], dim= 1)
+                cat_input_prompt = self.noise_level1(cat_input_prompt)
+                refined_feature = self.reduce_noise_level1(cat_input_prompt)
 
             tran_layer_2 = self.layer_lka_2(refined_feature)
 
             tran_layer_2 = tran_layer_2.view(tran_layer_2.size(0), tran_layer_2.size(3) * tran_layer_2.size(2),
                                              tran_layer_2.size(1))
             if self.last_layer:
+                
                 out = self.last_layer(
                     self.layer_up(tran_layer_2).view(b2, 4 * h2, 4 * w2, -1).permute(0, 3, 1, 2))  # 1 9 224 224
             else:
@@ -1023,22 +1021,26 @@ class Msa2Net_V2(nn.Module):
         self.decoder_3 = MyDecoderLayerLKAPrompt(
             (d_base_feat_size, d_base_feat_size),
             in_out_chan[3],
+            decoder_prompt=False,
             n_class=num_classes)
 
         self.decoder_2 = MyDecoderLayerLKAPrompt(
             (d_base_feat_size * 2, d_base_feat_size * 2),
             in_out_chan[2],
+            decoder_prompt=False,
             n_class=num_classes)
         
         self.decoder_1 = MyDecoderLayerLKAPrompt(
             (d_base_feat_size * 4, d_base_feat_size * 4),
             in_out_chan[1],
+            decoder_prompt=False,
             n_class=num_classes)
         
         self.decoder_0 = MyDecoderLayerLKAPrompt(
             (d_base_feat_size * 8, d_base_feat_size * 8),
             in_out_chan[0],
             n_class=num_classes,
+            decoder_prompt=True,
             is_last=True)
 
     def forward(self, x):
