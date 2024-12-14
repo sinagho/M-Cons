@@ -9,7 +9,7 @@ import numpy as np
 import torch
 import torch.backends.cudnn as cudnn
 
-from networks.msa2net import  Msa2Net
+from networks.msa2net import  Msa2Net_V3, Msa2Net_V4
 from trainer import trainer_synapse
 
 from fvcore.nn import FlopCountAnalysis
@@ -39,7 +39,7 @@ parser.add_argument("--max_epochs", type=int, default=400, help="maximum epoch n
 parser.add_argument("--batch_size", type=int, default=24, help="batch_size per gpu")
 parser.add_argument("--num_workers", type=int, default=8, help="num_workers")
 parser.add_argument("--eval_interval", type=int, default=20, help="eval_interval")
-parser.add_argument("--model_name", type=str, default="msa2net", help="model_name")
+parser.add_argument("--model_name", type=str, default="msa2net_v3", help="model_name")
 parser.add_argument("--n_gpu", type=int, default=1, help="total gpu")
 parser.add_argument("--deterministic", type=int, default=1, help="whether to use deterministic training")
 parser.add_argument("--base_lr", type=float, default=0.05, help="segmentation network base learning rate")
@@ -117,12 +117,16 @@ if __name__ == "__main__":
 
     if not os.path.exists(args.output_dir):
         os.makedirs(args.output_dir)
+    if args.model_name == "msa2net_v3":
+        net = Msa2Net_V3().cuda(0) # Msa2net + Freq-feature enhancement Decoder
+    elif args.model_name == "msa2net_v4":
+        net = Msa2Net_V4().cuda(0)
 
-    net = Msa2Net().cuda(0) # Msa2net + masag
-    
     input = torch.rand((1,3,224,224)).cuda(0)
+    n_parameters = sum(p.numel() for p in net.parameters() if p.requires_grad)
     flops = FlopCountAnalysis(net, input)
     model_flops = flops.total()
+    print(f"Total trainable parameters: {round(n_parameters * 1e-6, 2)} M")
     print(f"MAdds: {round(model_flops * 1e-9, 2)} G")
 
     #sys.exit()
