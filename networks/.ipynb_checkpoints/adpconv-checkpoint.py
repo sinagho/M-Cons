@@ -7,5 +7,5 @@ x = torch.rand(2, 4, 16, 16).cuda()
 from model_utils import AttentionModule, DeformableConv
 att = AttentionModule(in_channels=4).cuda()
 out = att(x)
-# print('out2', out.shape)
+print('out2', out.shape)
 #print("Adaptive Weight Shape (before reshape):", adaptive_weight.shape)

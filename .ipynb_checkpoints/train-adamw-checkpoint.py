@@ -9,8 +9,8 @@ import numpy as np
 import torch
 import torch.backends.cudnn as cudnn
 
-from networks.msa2net import  Msa2Net_V3, Msa2Net_V4, Msa2Net_V5
-from trainer import trainer_synapse
+from networks.msa2net import  Msa2Net_V3, Msa2Net_V4
+from trainer2 import trainer_synapse
 
 from fvcore.nn import FlopCountAnalysis
 import sys
@@ -33,7 +33,7 @@ parser.add_argument(
 parser.add_argument("--dataset", type=str, default="Synapse", help="experiment_name")
 parser.add_argument("--list_dir", type=str, default="./lists/lists_Synapse", help="list dir")
 parser.add_argument("--num_classes", type=int, default=9, help="output channel of network")
-parser.add_argument("--output_dir", type=str, default="/dss/dssfs04/lwp-dss-0002/pn36fu/pn36fu-dss-0000/reza/sina/miccai-v4-main-with-prompt-adaptive", help="output dir")
+parser.add_argument("--output_dir", type=str, default="/dss/dssfs04/lwp-dss-0002/pn36fu/pn36fu-dss-0000/reza/sina/miccai-v4-with-prompt-adaptive-adamw", help="output dir")
 parser.add_argument("--max_iterations", type=int, default=90000, help="maximum epoch number to train")
 parser.add_argument("--max_epochs", type=int, default=400, help="maximum epoch number to train")
 parser.add_argument("--batch_size", type=int, default=24, help="batch_size per gpu")
@@ -121,8 +121,6 @@ if __name__ == "__main__":
         net = Msa2Net_V3().cuda(0) # Msa2net + Freq-feature enhancement Decoder
     elif args.model_name == "msa2net_v4":
         net = Msa2Net_V4().cuda(0) # Msa2net + Freq-feature enhancement Decoder + Freq Adaptive Attn
-    elif args.model_name == "msa2net_v5":
-        net = Msa2Net_V5().cuda(0)
 
     input = torch.rand((1,3,224,224)).cuda(0)
     n_parameters = sum(p.numel() for p in net.parameters() if p.requires_grad)
