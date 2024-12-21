@@ -2388,7 +2388,7 @@ class Msa2Net_V7(nn.Module):
 
 class Msa2Net_V8(nn.Module):
     """
-    MSA^2Net V8 with Adaptive Attention Module + MyDecoderLayerLKAFreqEnhancedCat
+    MSA^2Net V8 with Adaptive Attention Module + MyDecoderLayerLKAFreqEnhancedCat 
     """
     def __init__(self, num_classes=9):
         super().__init__()

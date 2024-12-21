@@ -769,6 +769,74 @@ class FrqRefiner(nn.Module):
         
         return y
 
+
+class FrqRefinerEnhanced(nn.Module):
+    def __init__(self, dim=3,h=128,w=128):
+        super().__init__()
+        self.h = h
+        self.w = w
+        # w = w//2 + 1
+        self.complex_weights = FreqLightWeightPromptGenBlock(dct_h= h,
+                                                             dct_w= h,
+                                                             input_size=h,
+                                                             prompt_dim=dim,
+                                                             prompt_len=5,
+                                                             lin_dim=dim)
+        
+        self.body = nn.Sequential(nn.Conv2d(2*dim,2*dim,kernel_size=1,stride=1),
+                                    nn.GELU())
+        
+        self.conv_enhancer = nn.Sequential(nn.Conv2d(dim,
+                                                     dim,
+                                                     kernel_size=1,
+                                                     stride=1
+                                                     ),
+                                          nn.BatchNorm2d(dim),
+                                          nn.GELU())
+        
+    def forward(self, x, H = None, W = None):
+        
+        if self.h != None and self.w != None:
+            H = self.h
+            W = self.w
+        
+        x = F.interpolate(x, size=(H, W), mode='bicubic')
+        y = torch.fft.rfft2(x.to(torch.float32).cuda())
+        # print(y.shape)
+
+        y_imag = y.imag
+
+        # print(y_imag.shape)
+        y_real = y.real
+        # print(y_real.shape)
+        y_f = torch.cat([y_real, y_imag], dim=1)
+
+        # print(y_f.shape)
+
+        ## Weight Making ##
+ 
+        weight = torch.complex(self.complex_weights(x)[..., 0],self.complex_weights(x)[..., 1])
+
+        ########
+        # print(self.complex_weights(x)[..., 0].shape)
+        # print(weight.shape)
+        # print("shape is : ", weight.shape)
+        
+        y_att = self.body(y_f)
+        # print(y_att.shape)
+
+        y_f = y_f * y_att
+        # print(y_f.shape)
+        
+        y_real, y_imag = torch.chunk(y_f, 2, dim=1)
+        # print(y_real.shape, y_imag.shape)
+        y = torch.complex(y_real, y_imag)
+        y = y * weight
+        y = torch.fft.irfft2(y, s=(H, W))
+        y = self.conv_enhancer(y)
+        
+        return y
+
 class FrequencyPromptFusion(nn.Module):
     def __init__(self, dim, dim_bak,win_size, num_heads, qkv_bias=True, qk_scale=None, bias=False):
         super(FrequencyPromptFusion, self).__init__()
@@ -819,7 +887,41 @@ class FrequencyPromptFusion(nn.Module):
         attn_windows = out.view(-1, self.win_size, self.win_size, C)
         attn_windows = window_reverse(attn_windows, self.win_size, h, w)  # B H' W' C
         return rearrange(attn_windows, 'b h w c -> b c h w', h=h, w=w)
+
+
+class FrequencyPromptFusionEnhanced(nn.Module):
+    def __init__(self, dim, dim_bak, num_heads,win_size=8, bias=False):
+        super(FrequencyPromptFusionEnhanced, self).__init__()
+        self.num_heads = num_heads
+        self.temperature = nn.Parameter(torch.ones(num_heads, 1, 1))
+        self.q = nn.Conv2d(dim, dim, kernel_size=1, bias=bias)
+        self.ap_kv = nn.AdaptiveAvgPool2d(1)
+        self.kv = nn.Conv2d(dim_bak, dim * 2, kernel_size=1, bias=bias)
+
+        self.project_out = nn.Sequential(nn.Conv2d( dim, dim, kernel_size=1, bias=bias),
+                                         nn.BatchNorm2d(dim))
+
+    def forward(self, feature, prompt_feature):
+        b, c1,h,w = feature.shape
+        _, c2,_,_ = prompt_feature.shape
+
+        query = self.q(feature).reshape(b, h * w, self.num_heads, c1 // self.num_heads).permute(0, 2, 1, 3).contiguous()
+        
+        prompt_feature = self.ap_kv(prompt_feature)#.reshape(b, c2, -1).permute(0, 2, 1)
+        key_value = self.kv(prompt_feature).reshape(b, 2*c1, -1).permute(0, 2, 1).contiguous().reshape(b, -1, 2, self.num_heads, c1 // self.num_heads).permute(2, 0, 3, 1, 4).contiguous()
+        key, value = key_value[0], key_value[1]
+
+        attn = (query @ key.transpose(-2, -1).contiguous()) * self.temperature
+        attn = attn.softmax(dim=-1)
+
+        out = (attn @ value)
+
+        out = rearrange(out, 'b head (h w) c -> b (head c) h w', head=self.num_heads, h=h, w=w)
+        out = self.project_out(out)
+
+        return out
     
+
 ##########################################
 #
 #         General Decoder Blocks
@@ -1406,7 +1508,456 @@ class MyDecoderLayerAdapLKAFreq(nn.Module):
             out = self.layer_up(x1)
         return out
     
+class MyDecoderLayerLKAFreqEnhanced(nn.Module):
+    def __init__(
+            self, input_size: tuple, in_out_chan: tuple, n_class=9,
+            norm_layer=nn.LayerNorm, is_last=False, decoder_prompt = False
+    ):
+        super().__init__()
+        out_dim = in_out_chan[0]
+        x1_dim = in_out_chan[1]
+        self.decoder_prompt = decoder_prompt
+        # prompt_ratio = prompt_ratio
+        
+        if not is_last:
+            self.x1_linear = nn.Linear(x1_dim, out_dim)
+            #self.ag_attn = MultiScaleGatedAttn(dim=x1_dim)
+            self.ag_attn_norm = nn.LayerNorm(out_dim)
 
+            self.layer_up = PatchExpand(input_resolution=input_size, dim=out_dim, dim_scale=2, norm_layer=norm_layer)
+            self.last_layer = None
+        else:
+            self.x1_linear = nn.Linear(x1_dim, out_dim)
+            #self.ag_attn = MultiScaleGatedAttn(dim=x1_dim)
+            self.ag_attn_norm = nn.LayerNorm(out_dim)
+
+            self.layer_up = FinalPatchExpand_X4(
+                input_resolution=input_size, dim=out_dim, dim_scale=4, norm_layer=norm_layer
+            )
+            self.last_layer = nn.Conv2d(out_dim, n_class, 1)
+
+        
+        self.layer_lka_1 = LKABlock(dim=out_dim)
+        ## Prompt Module must be located here.
+
+        #dim_p = int(out_dim * 0.75)
+        if decoder_prompt: 
+            dim_p = out_dim
+            self.refiner = FrqRefinerEnhanced(dim = dim_p,
+                                              h = input_size[0],
+                                              w = input_size[0])
+        
+            self.fused = FrequencyPromptFusionEnhanced(dim = dim_p,
+                                                       dim_bak= dim_p,
+                                                       win_size= 8,
+                                                       num_heads= 2)
+        
+            self.mlp = nn.Conv2d(int(dim_p),int(dim_p),kernel_size=3,bias=False, stride=1, padding=1)
+
+        self.bn1 = nn.BatchNorm2d(num_features = out_dim)
+        self.layer_lka_2 = LKABlock(dim=out_dim)
+        self.bn2 = nn.BatchNorm2d(num_features = out_dim)
+        def init_weights(self):
+            for m in self.modules():
+                if isinstance(m, nn.Linear):
+                    nn.init.xavier_uniform_(m.weight)
+                    if m.bias is not None:
+                        nn.init.zeros_(m.bias)
+                elif isinstance(m, nn.LayerNorm):
+                    nn.init.ones_(m.weight)
+                    nn.init.zeros_(m.bias)
+                elif isinstance(m, nn.Conv2d):
+                    nn.init.xavier_uniform_(m.weight)
+                    if m.bias is not None:
+                        nn.init.zeros_(m.bias)
+
+        init_weights(self)
+
+    def forward(self, x1, x2=None):
+        if x2 is not None:  # skip connection exist
+            x2 = x2.contiguous()
+            # b, c, h, w = x1.shape
+            b2, h2, w2, c2 = x2.shape  # e.g: 1 28 28 320, 1 56 56 128
+            x2 = x2.view(b2, -1, c2)  # e.g: 1 784 320, 1 3136 128
+
+            x1_expand = self.x1_linear(x1)  # e.g: 1 784 256 --> 1 784 320, 1 3136 160 --> 1 3136 128
+
+            x2_new = x2.view(x2.size(0), x2.size(2), x2.size(1) // w2, x2.size(1) // h2) # B, C, H, W
+            
+
+            x1_expand = x1_expand.view(x2.size(0), x2.size(2), x2.size(1) // w2, x2.size(1) // h2) # B, C, H, W
+
+            # print(f'the x1_expand shape is: {x1_expand.shape}\n\t the x2_new shape is: {x2_new.shape}')
+
+            cat_linear_x = x1_expand + x2_new  # B C H W
+            cat_linear_x = cat_linear_x.permute(0, 2, 3, 1)  # B H W C
+            cat_linear_x = self.ag_attn_norm(cat_linear_x)  # B H W C
+
+            cat_linear_x = cat_linear_x.permute(0, 3, 1, 2).contiguous()  # B C H W
+
+            refined_feature = self.layer_lka_1(cat_linear_x)
+            
+            
+            if self.decoder_prompt:
+                prompt_layer_1 = self.refiner(refined_feature)
+                # cat_input_prompt = torch.cat([refined_feature, prompt_layer_1], dim= 1)
+                fused_map = self.fused(refined_feature, prompt_layer_1)
+                refined_feature = self.mlp(fused_map).contiguous()
+
+            tran_layer_2 = self.bn2(self.layer_lka_2(self.bn1(refined_feature)))
+
+            tran_layer_2 = tran_layer_2.view(tran_layer_2.size(0), tran_layer_2.size(3) * tran_layer_2.size(2),
+                                             tran_layer_2.size(1))
+            if self.last_layer:
+                
+                out = self.last_layer(
+                    self.layer_up(tran_layer_2).view(b2, 4 * h2, 4 * w2, -1).permute(0, 3, 1, 2))  # 1 9 224 224
+            else:
+                out = self.layer_up(tran_layer_2)  # 1 3136 160
+        else:
+            out = self.layer_up(x1)
+        return out
+
+class MyDecoderLayerLKAFreqEnhancedAdaptive(nn.Module):
+    def __init__(
+            self, input_size: tuple, in_out_chan: tuple, n_class=9,
+            norm_layer=nn.LayerNorm, is_last=False, decoder_prompt = False
+    ):
+        super().__init__()
+        out_dim = in_out_chan[0]
+        x1_dim = in_out_chan[1]
+        self.decoder_prompt = decoder_prompt
+        # prompt_ratio = prompt_ratio
+        
+        if not is_last:
+            self.x1_linear = nn.Linear(x1_dim, out_dim)
+            #self.ag_attn = MultiScaleGatedAttn(dim=x1_dim)
+            self.ag_attn_norm = nn.LayerNorm(out_dim)
+
+            self.layer_up = PatchExpand(input_resolution=input_size, dim=out_dim, dim_scale=2, norm_layer=norm_layer)
+            self.last_layer = None
+        else:
+            self.x1_linear = nn.Linear(x1_dim, out_dim)
+            #self.ag_attn = MultiScaleGatedAttn(dim=x1_dim)
+            self.ag_attn_norm = nn.LayerNorm(out_dim)
+
+            self.layer_up = FinalPatchExpand_X4(
+                input_resolution=input_size, dim=out_dim, dim_scale=4, norm_layer=norm_layer
+            )
+            self.last_layer = nn.Conv2d(out_dim, n_class, 1)
+
+        
+        self.layer_lka_1 = LKABlock(dim=out_dim)
+        ## Prompt Module must be located here.
+
+        #dim_p = int(out_dim * 0.75)
+        if decoder_prompt: 
+            dim_p = out_dim
+            self.refiner = FrqRefinerEnhanced(dim = dim_p,
+                                              h = input_size[0],
+                                              w = input_size[0])
+        
+            self.fused = FrequencyPromptFusionEnhanced(dim = dim_p,
+                                                       dim_bak= dim_p,
+                                                       win_size= 8,
+                                                       num_heads= 2)
+        
+            self.mlp = nn.Conv2d(int(dim_p),int(dim_p),kernel_size=3,bias=False, stride=1, padding=1)
+
+        self.bn1 = nn.BatchNorm2d(num_features = out_dim)
+        self.layer_lka_2 = AdaptiveAttentionModule(in_channels=out_dim)
+        self.bn2 = nn.BatchNorm2d(num_features = out_dim)
+        def init_weights(self):
+            for m in self.modules():
+                if isinstance(m, nn.Linear):
+                    nn.init.xavier_uniform_(m.weight)
+                    if m.bias is not None:
+                        nn.init.zeros_(m.bias)
+                elif isinstance(m, nn.LayerNorm):
+                    nn.init.ones_(m.weight)
+                    nn.init.zeros_(m.bias)
+                elif isinstance(m, nn.Conv2d):
+                    nn.init.xavier_uniform_(m.weight)
+                    if m.bias is not None:
+                        nn.init.zeros_(m.bias)
+
+        init_weights(self)
+
+    def forward(self, x1, x2=None):
+        if x2 is not None:  # skip connection exist
+            x2 = x2.contiguous()
+            # b, c, h, w = x1.shape
+            b2, h2, w2, c2 = x2.shape  # e.g: 1 28 28 320, 1 56 56 128
+            x2 = x2.view(b2, -1, c2)  # e.g: 1 784 320, 1 3136 128
+
+            x1_expand = self.x1_linear(x1)  # e.g: 1 784 256 --> 1 784 320, 1 3136 160 --> 1 3136 128
+
+            x2_new = x2.view(x2.size(0), x2.size(2), x2.size(1) // w2, x2.size(1) // h2) # B, C, H, W
+            
+
+            x1_expand = x1_expand.view(x2.size(0), x2.size(2), x2.size(1) // w2, x2.size(1) // h2) # B, C, H, W
+
+            # print(f'the x1_expand shape is: {x1_expand.shape}\n\t the x2_new shape is: {x2_new.shape}')
+
+            cat_linear_x = x1_expand + x2_new  # B C H W
+            cat_linear_x = cat_linear_x.permute(0, 2, 3, 1)  # B H W C
+            cat_linear_x = self.ag_attn_norm(cat_linear_x)  # B H W C
+
+            cat_linear_x = cat_linear_x.permute(0, 3, 1, 2).contiguous()  # B C H W
+
+            refined_feature = self.layer_lka_1(cat_linear_x)
+            
+            
+            if self.decoder_prompt:
+                prompt_layer_1 = self.refiner(refined_feature)
+                # cat_input_prompt = torch.cat([refined_feature, prompt_layer_1], dim= 1)
+                fused_map = self.fused(refined_feature, prompt_layer_1)
+                refined_feature = self.mlp(fused_map).contiguous()
+
+            tran_layer_2 = self.bn2(self.layer_lka_2(self.bn1(refined_feature)))
+
+            tran_layer_2 = tran_layer_2.view(tran_layer_2.size(0), tran_layer_2.size(3) * tran_layer_2.size(2),
+                                             tran_layer_2.size(1))
+            if self.last_layer:
+                
+                out = self.last_layer(
+                    self.layer_up(tran_layer_2).view(b2, 4 * h2, 4 * w2, -1).permute(0, 3, 1, 2))  # 1 9 224 224
+            else:
+                out = self.layer_up(tran_layer_2)  # 1 3136 160
+        else:
+            out = self.layer_up(x1)
+        return out
+
+
+class MyDecoderLayerLKAFreqEnhancedCat(nn.Module):
+    def __init__(
+            self, input_size: tuple, in_out_chan: tuple, n_class=9,
+            norm_layer=nn.LayerNorm, is_last=False, decoder_prompt = False
+    ):
+        super().__init__()
+        out_dim = in_out_chan[0]
+        x1_dim = in_out_chan[1]
+        self.decoder_prompt = decoder_prompt
+        # prompt_ratio = prompt_ratio
+        
+        if not is_last:
+            self.x1_linear = nn.Linear(x1_dim, out_dim)
+            #self.ag_attn = MultiScaleGatedAttn(dim=x1_dim)
+            self.ag_attn_norm = nn.LayerNorm(out_dim)
+
+            self.layer_up = PatchExpand(input_resolution=input_size, dim=out_dim, dim_scale=2, norm_layer=norm_layer)
+            self.last_layer = None
+        else:
+            self.x1_linear = nn.Linear(x1_dim, out_dim)
+            #self.ag_attn = MultiScaleGatedAttn(dim=x1_dim)
+            self.ag_attn_norm = nn.LayerNorm(out_dim)
+
+            self.layer_up = FinalPatchExpand_X4(
+                input_resolution=input_size, dim=out_dim, dim_scale=4, norm_layer=norm_layer
+            )
+            self.last_layer = nn.Conv2d(out_dim, n_class, 1)
+
+        
+        self.layer_lka_1 = LKABlock(dim=out_dim)
+        ## Prompt Module must be located here.
+
+        #dim_p = int(out_dim * 0.75)
+        if decoder_prompt: 
+            dim_p = out_dim
+            self.refiner = FrqRefinerEnhanced(dim = dim_p,
+                                              h = input_size[0],
+                                              w = input_size[0])
+        
+            # self.fused = FrequencyPromptFusionEnhanced(dim = dim_p,
+            #                                            dim_bak= dim,
+            #                                            win_size= 8,
+            #                                            num_heads= 2)
+            self.noise_level1 = TransformerBlock(dim=int(dim_p*2**1) ,
+                                             num_heads=1, 
+                                             ffn_expansion_factor=2.66, 
+                                             bias=False, LayerNorm_type='WithBias')
+            
+            self.mlp = nn.Conv2d(int(dim_p),int(dim_p),kernel_size=1,bias=False, stride=1, padding=1)
+
+        self.bn1 = nn.BatchNorm2d(num_features = out_dim)
+        self.layer_lka_2 = LKABlock(dim=out_dim)
+        self.bn2 = nn.BatchNorm2d(num_features = out_dim)
+        def init_weights(self):
+            for m in self.modules():
+                if isinstance(m, nn.Linear):
+                    nn.init.xavier_uniform_(m.weight)
+                    if m.bias is not None:
+                        nn.init.zeros_(m.bias)
+                elif isinstance(m, nn.LayerNorm):
+                    nn.init.ones_(m.weight)
+                    nn.init.zeros_(m.bias)
+                elif isinstance(m, nn.Conv2d):
+                    nn.init.xavier_uniform_(m.weight)
+                    if m.bias is not None:
+                        nn.init.zeros_(m.bias)
+
+        init_weights(self)
+
+    def forward(self, x1, x2=None):
+        if x2 is not None:  # skip connection exist
+            x2 = x2.contiguous()
+            # b, c, h, w = x1.shape
+            b2, h2, w2, c2 = x2.shape  # e.g: 1 28 28 320, 1 56 56 128
+            x2 = x2.view(b2, -1, c2)  # e.g: 1 784 320, 1 3136 128
+
+            x1_expand = self.x1_linear(x1)  # e.g: 1 784 256 --> 1 784 320, 1 3136 160 --> 1 3136 128
+
+            x2_new = x2.view(x2.size(0), x2.size(2), x2.size(1) // w2, x2.size(1) // h2) # B, C, H, W
+            
+
+            x1_expand = x1_expand.view(x2.size(0), x2.size(2), x2.size(1) // w2, x2.size(1) // h2) # B, C, H, W
+
+            # print(f'the x1_expand shape is: {x1_expand.shape}\n\t the x2_new shape is: {x2_new.shape}')
+
+            cat_linear_x = x1_expand + x2_new  # B C H W
+            cat_linear_x = cat_linear_x.permute(0, 2, 3, 1)  # B H W C
+            cat_linear_x = self.ag_attn_norm(cat_linear_x)  # B H W C
+
+            cat_linear_x = cat_linear_x.permute(0, 3, 1, 2).contiguous()  # B C H W
+
+            refined_feature = self.layer_lka_1(cat_linear_x)
+            
+            
+            if self.decoder_prompt:
+                prompt_layer_1 = self.refiner(refined_feature)
+                cat_input_prompt = torch.cat([refined_feature, prompt_layer_1], dim= 1)
+                # fused_map = self.fused(refined_feature, prompt_layer_1)
+                fused_map = self.noise_level1(cat_input_prompt)
+                refined_feature = self.mlp(fused_map).contiguous()
+
+            tran_layer_2 = self.bn2(self.layer_lka_2(self.bn1(refined_feature)))
+
+            tran_layer_2 = tran_layer_2.view(tran_layer_2.size(0), tran_layer_2.size(3) * tran_layer_2.size(2),
+                                             tran_layer_2.size(1))
+            if self.last_layer:
+                
+                out = self.last_layer(
+                    self.layer_up(tran_layer_2).view(b2, 4 * h2, 4 * w2, -1).permute(0, 3, 1, 2))  # 1 9 224 224
+            else:
+                out = self.layer_up(tran_layer_2)  # 1 3136 160
+        else:
+            out = self.layer_up(x1)
+        return out
+    
+class MyDecoderLayerLKAFreqEnhancedCatAdapt(nn.Module):
+    def __init__(
+            self, input_size: tuple, in_out_chan: tuple, n_class=9,
+            norm_layer=nn.LayerNorm, is_last=False, decoder_prompt = False
+    ):
+        super().__init__()
+        out_dim = in_out_chan[0]
+        x1_dim = in_out_chan[1]
+        self.decoder_prompt = decoder_prompt
+        # prompt_ratio = prompt_ratio
+        
+        if not is_last:
+            self.x1_linear = nn.Linear(x1_dim, out_dim)
+            #self.ag_attn = MultiScaleGatedAttn(dim=x1_dim)
+            self.ag_attn_norm = nn.LayerNorm(out_dim)
+
+            self.layer_up = PatchExpand(input_resolution=input_size, dim=out_dim, dim_scale=2, norm_layer=norm_layer)
+            self.last_layer = None
+        else:
+            self.x1_linear = nn.Linear(x1_dim, out_dim)
+            #self.ag_attn = MultiScaleGatedAttn(dim=x1_dim)
+            self.ag_attn_norm = nn.LayerNorm(out_dim)
+
+            self.layer_up = FinalPatchExpand_X4(
+                input_resolution=input_size, dim=out_dim, dim_scale=4, norm_layer=norm_layer
+            )
+            self.last_layer = nn.Conv2d(out_dim, n_class, 1)
+
+        
+        self.layer_lka_1 = LKABlock(dim=out_dim)
+        ## Prompt Module must be located here.
+
+        #dim_p = int(out_dim * 0.75)
+        if decoder_prompt: 
+            dim_p = out_dim
+            self.refiner = FrqRefinerEnhanced(dim = dim_p,
+                                              h = input_size[0],
+                                              w = input_size[0])
+        
+            # self.fused = FrequencyPromptFusionEnhanced(dim = dim_p,
+            #                                            dim_bak= dim,
+            #                                            win_size= 8,
+            #                                            num_heads= 2)
+            self.noise_level1 = TransformerBlock(dim=int(dim_p*2**1) ,
+                                             num_heads=1, 
+                                             ffn_expansion_factor=2.66, 
+                                             bias=False, LayerNorm_type='WithBias')
+            
+            self.mlp = nn.Conv2d(int(dim_p**2),int(dim_p),kernel_size=1,bias=False, stride=1, padding=1)
+
+        self.bn1 = nn.BatchNorm2d(num_features = out_dim)
+        self.layer_lka_2 = AdaptiveAttentionModule(in_channels=out_dim)
+        self.bn2 = nn.BatchNorm2d(num_features = out_dim)
+        def init_weights(self):
+            for m in self.modules():
+                if isinstance(m, nn.Linear):
+                    nn.init.xavier_uniform_(m.weight)
+                    if m.bias is not None:
+                        nn.init.zeros_(m.bias)
+                elif isinstance(m, nn.LayerNorm):
+                    nn.init.ones_(m.weight)
+                    nn.init.zeros_(m.bias)
+                elif isinstance(m, nn.Conv2d):
+                    nn.init.xavier_uniform_(m.weight)
+                    if m.bias is not None:
+                        nn.init.zeros_(m.bias)
+
+        init_weights(self)
+
+    def forward(self, x1, x2=None):
+        if x2 is not None:  # skip connection exist
+            x2 = x2.contiguous()
+            # b, c, h, w = x1.shape
+            b2, h2, w2, c2 = x2.shape  # e.g: 1 28 28 320, 1 56 56 128
+            x2 = x2.view(b2, -1, c2)  # e.g: 1 784 320, 1 3136 128
+
+            x1_expand = self.x1_linear(x1)  # e.g: 1 784 256 --> 1 784 320, 1 3136 160 --> 1 3136 128
+
+            x2_new = x2.view(x2.size(0), x2.size(2), x2.size(1) // w2, x2.size(1) // h2) # B, C, H, W
+            
+
+            x1_expand = x1_expand.view(x2.size(0), x2.size(2), x2.size(1) // w2, x2.size(1) // h2) # B, C, H, W
+
+            # print(f'the x1_expand shape is: {x1_expand.shape}\n\t the x2_new shape is: {x2_new.shape}')
+
+            cat_linear_x = x1_expand + x2_new  # B C H W
+            cat_linear_x = cat_linear_x.permute(0, 2, 3, 1)  # B H W C
+            cat_linear_x = self.ag_attn_norm(cat_linear_x)  # B H W C
+
+            cat_linear_x = cat_linear_x.permute(0, 3, 1, 2).contiguous()  # B C H W
+
+            refined_feature = self.layer_lka_1(cat_linear_x)
+            
+            
+            if self.decoder_prompt:
+                prompt_layer_1 = self.refiner(refined_feature)
+                cat_input_prompt = torch.cat([refined_feature, prompt_layer_1], dim= 1)
+                # fused_map = self.fused(refined_feature, prompt_layer_1)
+                fused_map = self.noise_level1(cat_input_prompt)
+                refined_feature = self.mlp(fused_map).contiguous()
+
+            tran_layer_2 = self.bn2(self.layer_lka_2(self.bn1(refined_feature)))
+
+            tran_layer_2 = tran_layer_2.view(tran_layer_2.size(0), tran_layer_2.size(3) * tran_layer_2.size(2),
+                                             tran_layer_2.size(1))
+            if self.last_layer:
+                
+                out = self.last_layer(
+                    self.layer_up(tran_layer_2).view(b2, 4 * h2, 4 * w2, -1).permute(0, 3, 1, 2))  # 1 9 224 224
+            else:
+                out = self.layer_up(tran_layer_2)  # 1 3136 160
+        else:
+            out = self.layer_up(x1)
+        return out
 ##########################################
 #
 #                MSA^2Net
@@ -1710,7 +2261,194 @@ class Msa2Net_V5(nn.Module):
 
         return tmp_0
     
+class Msa2Net_V6(nn.Module):
+    """
+    MSA^2Net V6 without Adaptive Attention Module + MyDecoderLayerLKAFreqEnhanced
+    """
+    def __init__(self, num_classes=9):
+        super().__init__()
 
+        # Encoder
+        self.backbone = MaxViT4Out_Small(n_class=num_classes, img_size=224)
+
+        # Decoder
+        d_base_feat_size = 7  # 16 for 512 input size, and 7 for 224
+        in_out_chan = [
+            [96, 96, 96, 96, 96],
+            [192, 192, 192, 192, 192],
+            [384, 384, 384, 384, 384],
+            [768, 768, 768, 768, 768],
+        ]  # [dim, out_dim, key_dim, value_dim, x2_dim]
+
+
+        self.decoder_3 = MyDecoderLayerLKAFreqEnhanced(
+            (d_base_feat_size, d_base_feat_size),
+            in_out_chan[3],
+            decoder_prompt=False,
+            n_class=num_classes)
+
+        self.decoder_2 = MyDecoderLayerLKAFreqEnhanced(
+            (d_base_feat_size * 2, d_base_feat_size * 2),
+            in_out_chan[2],
+            decoder_prompt=False,
+            n_class=num_classes)
+        
+        self.decoder_1 = MyDecoderLayerLKAFreqEnhanced(
+            (d_base_feat_size * 4, d_base_feat_size * 4),
+            in_out_chan[1],
+            decoder_prompt=False,
+            n_class=num_classes)
+        
+        self.decoder_0 = MyDecoderLayerLKAFreqEnhanced(
+            (d_base_feat_size * 8, d_base_feat_size * 8),
+            in_out_chan[0],
+            n_class=num_classes,
+            decoder_prompt=True,
+            is_last=True)
+
+    def forward(self, x):
+        # ---------------Encoder-------------------------
+        if x.size()[1] == 1:
+            x = x.repeat(1, 3, 1, 1)
+
+        output_enc_3, output_enc_2, output_enc_1, output_enc_0 = self.backbone(x)
+
+        b, c, _, _ = output_enc_3.shape
+        # print(output_enc_3.shape)
+        # ---------------Decoder-------------------------
+        tmp_3 = self.decoder_3(output_enc_3.permute(0, 2, 3, 1).view(b, -1, c))
+        tmp_2 = self.decoder_2(tmp_3, output_enc_2.permute(0, 2, 3, 1))
+        tmp_1 = self.decoder_1(tmp_2, output_enc_1.permute(0, 2, 3, 1))
+        tmp_0 = self.decoder_0(tmp_1, output_enc_0.permute(0, 2, 3, 1))
+
+        return tmp_0
+    
+class Msa2Net_V7(nn.Module):
+    """
+    MSA^2Net V7 with Adaptive Attention Module + MyDecoderLayerLKAFreqEnhanced
+    """
+    def __init__(self, num_classes=9):
+        super().__init__()
+
+        # Encoder
+        self.backbone = MaxViT4Out_Small(n_class=num_classes, img_size=224)
+
+        # Decoder
+        d_base_feat_size = 7  # 16 for 512 input size, and 7 for 224
+        in_out_chan = [
+            [96, 96, 96, 96, 96],
+            [192, 192, 192, 192, 192],
+            [384, 384, 384, 384, 384],
+            [768, 768, 768, 768, 768],
+        ]  # [dim, out_dim, key_dim, value_dim, x2_dim]
+
+
+        self.decoder_3 = MyDecoderLayerLKAFreqEnhanced(
+            (d_base_feat_size, d_base_feat_size),
+            in_out_chan[3],
+            decoder_prompt=False,
+            n_class=num_classes)
+
+        self.decoder_2 = MyDecoderLayerLKAFreqEnhanced(
+            (d_base_feat_size * 2, d_base_feat_size * 2),
+            in_out_chan[2],
+            decoder_prompt=False,
+            n_class=num_classes)
+        
+        self.decoder_1 = MyDecoderLayerLKAFreqEnhanced(
+            (d_base_feat_size * 4, d_base_feat_size * 4),
+            in_out_chan[1],
+            decoder_prompt=False,
+            n_class=num_classes)
+        
+        self.decoder_0 = MyDecoderLayerLKAFreqEnhancedAdaptive(
+            (d_base_feat_size * 8, d_base_feat_size * 8),
+            in_out_chan[0],
+            n_class=num_classes,
+            decoder_prompt=True,
+            is_last=True)
+
+    def forward(self, x):
+        # ---------------Encoder-------------------------
+        if x.size()[1] == 1:
+            x = x.repeat(1, 3, 1, 1)
+
+        output_enc_3, output_enc_2, output_enc_1, output_enc_0 = self.backbone(x)
+
+        b, c, _, _ = output_enc_3.shape
+        # print(output_enc_3.shape)
+        # ---------------Decoder-------------------------
+        tmp_3 = self.decoder_3(output_enc_3.permute(0, 2, 3, 1).view(b, -1, c))
+        tmp_2 = self.decoder_2(tmp_3, output_enc_2.permute(0, 2, 3, 1))
+        tmp_1 = self.decoder_1(tmp_2, output_enc_1.permute(0, 2, 3, 1))
+        tmp_0 = self.decoder_0(tmp_1, output_enc_0.permute(0, 2, 3, 1))
+
+        return tmp_0
+    
+
+class Msa2Net_V8(nn.Module):
+    """
+    MSA^2Net V8 with Adaptive Attention Module + MyDecoderLayerLKAFreqEnhancedCat 
+    """
+    def __init__(self, num_classes=9):
+        super().__init__()
+
+        # Encoder
+        self.backbone = MaxViT4Out_Small(n_class=num_classes, img_size=224)
+
+        # Decoder
+        d_base_feat_size = 7  # 16 for 512 input size, and 7 for 224
+        in_out_chan = [
+            [96, 96, 96, 96, 96],
+            [192, 192, 192, 192, 192],
+            [384, 384, 384, 384, 384],
+            [768, 768, 768, 768, 768],
+        ]  # [dim, out_dim, key_dim, value_dim, x2_dim]
+
+
+        self.decoder_3 = MyDecoderLayerLKAFreqEnhancedCat(
+            (d_base_feat_size, d_base_feat_size),
+            in_out_chan[3],
+            decoder_prompt=False,
+            n_class=num_classes)
+
+        self.decoder_2 = MyDecoderLayerLKAFreqEnhancedCat(
+            (d_base_feat_size * 2, d_base_feat_size * 2),
+            in_out_chan[2],
+            decoder_prompt=False,
+            n_class=num_classes)
+        
+        self.decoder_1 = MyDecoderLayerLKAFreqEnhancedCat(
+            (d_base_feat_size * 4, d_base_feat_size * 4),
+            in_out_chan[1],
+            decoder_prompt=False,
+            n_class=num_classes)
+        
+        self.decoder_0 = MyDecoderLayerLKAFreqEnhancedCatAdapt(
+            (d_base_feat_size * 8, d_base_feat_size * 8),
+            in_out_chan[0],
+            n_class=num_classes,
+            decoder_prompt=True,
+            is_last=True)
+
+    def forward(self, x):
+        # ---------------Encoder-------------------------
+        if x.size()[1] == 1:
+            x = x.repeat(1, 3, 1, 1)
+
+        output_enc_3, output_enc_2, output_enc_1, output_enc_0 = self.backbone(x)
+
+        b, c, _, _ = output_enc_3.shape
+        # print(output_enc_3.shape)
+        # ---------------Decoder-------------------------
+        tmp_3 = self.decoder_3(output_enc_3.permute(0, 2, 3, 1).view(b, -1, c))
+        tmp_2 = self.decoder_2(tmp_3, output_enc_2.permute(0, 2, 3, 1))
+        tmp_1 = self.decoder_1(tmp_2, output_enc_1.permute(0, 2, 3, 1))
+        tmp_0 = self.decoder_0(tmp_1, output_enc_0.permute(0, 2, 3, 1))
+
+        return tmp_0
+    
+    
 if __name__ == "__main__":
     input0 = torch.rand((1, 3, 224, 224)).cuda(0)
     input = torch.randn((1, 768, 7, 7)).cuda(0)
