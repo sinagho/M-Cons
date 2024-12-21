@@ -1962,6 +1962,134 @@ class MyDecoderLayerLKAFreqEnhancedCatAdapt(nn.Module):
         else:
             out = self.layer_up(x1)
         return out
+    
+class MyDecoderLayerLKAFreqEnhancedCatAdapt_inter(nn.Module):
+    def __init__(
+            self, input_size: tuple, in_out_chan: tuple, n_class=9,
+            norm_layer=nn.LayerNorm, is_last=False, decoder_prompt = False
+    ):
+        super().__init__()
+        out_dim = in_out_chan[0]
+        x1_dim = in_out_chan[1]
+        self.decoder_prompt = decoder_prompt
+        # prompt_ratio = prompt_ratio
+        
+        if not is_last:
+            self.x1_linear = nn.Linear(x1_dim, out_dim)
+            #self.ag_attn = MultiScaleGatedAttn(dim=x1_dim)
+            self.ag_attn_norm = nn.LayerNorm(out_dim)
+
+            self.layer_up = PatchExpand(input_resolution=input_size, dim=out_dim, dim_scale=2, norm_layer=norm_layer)
+            self.last_layer = None
+        else:
+            self.x1_linear = nn.Linear(x1_dim, out_dim)
+            #self.ag_attn = MultiScaleGatedAttn(dim=x1_dim)
+            self.ag_attn_norm = nn.LayerNorm(out_dim)
+
+            self.layer_up = FinalPatchExpand_X4(
+                input_resolution=input_size, dim=out_dim, dim_scale=4, norm_layer=norm_layer
+            )
+            self.last_layer = nn.Conv2d(out_dim, n_class, 1)
+
+        
+        self.layer_lka_1 = LKABlock(dim=out_dim)
+        ## Prompt Module must be located here.
+
+        #dim_p = int(out_dim * 0.75)
+        if decoder_prompt: 
+            dim_p = out_dim
+            self.refiner = FrqRefinerEnhanced(dim = dim_p,
+                                              h = input_size[0],
+                                              w = input_size[0])
+        
+            # self.fused = FrequencyPromptFusionEnhanced(dim = dim_p,
+            #                                            dim_bak= dim,
+            #                                            win_size= 8,
+            #                                            num_heads= 2)
+            self.noise_level1 = TransformerBlock(dim=int(dim_p*2**1) ,
+                                             num_heads=1, 
+                                             ffn_expansion_factor=2.66, 
+                                             bias=False, LayerNorm_type='WithBias')
+            
+            self.mlp = nn.Conv2d(int(dim_p*2),int(dim_p),kernel_size=1,bias=False, stride=1)
+
+        self.bn1 = nn.BatchNorm2d(num_features = out_dim)
+        self.layer_lka_2 = AdaptiveAttentionModule(in_channels=out_dim)
+        self.bn2 = nn.BatchNorm2d(num_features = out_dim)
+        def init_weights(self):
+            for m in self.modules():
+                if isinstance(m, nn.Linear):
+                    nn.init.xavier_uniform_(m.weight)
+                    if m.bias is not None:
+                        nn.init.zeros_(m.bias)
+                elif isinstance(m, nn.LayerNorm):
+                    nn.init.ones_(m.weight)
+                    nn.init.zeros_(m.bias)
+                elif isinstance(m, nn.Conv2d):
+                    nn.init.xavier_uniform_(m.weight)
+                    if m.bias is not None:
+                        nn.init.zeros_(m.bias)
+
+        init_weights(self)
+
+    def forward(self, x1, x2=None):
+        if x2 is not None:  # skip connection exist
+            x2 = x2.contiguous()
+            # b, c, h, w = x1.shape
+            b2, h2, w2, c2 = x2.shape  # e.g: 1 28 28 320, 1 56 56 128
+            x2 = x2.view(b2, -1, c2)  # e.g: 1 784 320, 1 3136 128
+
+            x1_expand = self.x1_linear(x1)  # e.g: 1 784 256 --> 1 784 320, 1 3136 160 --> 1 3136 128
+
+            x2_new = x2.view(x2.size(0), x2.size(2), x2.size(1) // w2, x2.size(1) // h2) # B, C, H, W
+            
+
+            x1_expand = x1_expand.view(x2.size(0), x2.size(2), x2.size(1) // w2, x2.size(1) // h2) # B, C, H, W
+
+            # print(f'the x1_expand shape is: {x1_expand.shape}\n\t the x2_new shape is: {x2_new.shape}')
+
+            cat_linear_x = x1_expand + x2_new  # B C H W
+            cat_linear_x = cat_linear_x.permute(0, 2, 3, 1)  # B H W C
+            cat_linear_x = self.ag_attn_norm(cat_linear_x)  # B H W C
+
+            cat_linear_x = cat_linear_x.permute(0, 3, 1, 2).contiguous()  # B C H W
+
+            refined_feature = self.layer_lka_1(cat_linear_x) # Raw Feature
+            
+            
+            if self.decoder_prompt:
+                refined_feature_weighted = torch.sigmoid(refined_feature)
+
+                prompt_layer_1 = self.refiner(refined_feature) # Frequency Refined Feature
+
+                prompt_layer_1_weighted = torch.sigmoid(prompt_layer_1)
+
+                prompt_layer_1 = prompt_layer_1 * refined_feature_weighted
+                refined_feature = refined_feature * prompt_layer_1_weighted
+                
+#                 print(prompt_layer_1)
+                cat_input_prompt = torch.cat([refined_feature, prompt_layer_1], dim= 1)
+#                 print(cat_input_prompt.shape)
+                # fused_map = self.fused(refined_feature, prompt_layer_1)
+                fused_map = self.noise_level1(cat_input_prompt)
+#                 print(fused_map.shape)
+                refined_feature = self.mlp(fused_map).contiguous()
+#                 print(refined_feature.shape)
+
+            tran_layer_2 = self.bn2(self.layer_lka_2(self.bn1(refined_feature)))
+
+            tran_layer_2 = tran_layer_2.view(tran_layer_2.size(0), tran_layer_2.size(3) * tran_layer_2.size(2),
+                                             tran_layer_2.size(1))
+            if self.last_layer:
+                
+                out = self.last_layer(
+                    self.layer_up(tran_layer_2).view(b2, 4 * h2, 4 * w2, -1).permute(0, 3, 1, 2))  # 1 9 224 224
+            else:
+                out = self.layer_up(tran_layer_2)  # 1 3136 160
+        else:
+            out = self.layer_up(x1)
+        return out
+    
 ##########################################
 #
 #                MSA^2Net
@@ -2452,7 +2580,68 @@ class Msa2Net_V8(nn.Module):
 
         return tmp_0
     
-    
+class Msa2Net_V9(nn.Module):
+    """
+    MSA^2Net V9 with Adaptive Attention Module + MyDecoderLayerLKAFreqEnhancedCat + Bidirectional Interaction
+    """
+    def __init__(self, num_classes=9):
+        super().__init__()
+
+        # Encoder
+        self.backbone = MaxViT4Out_Small(n_class=num_classes, img_size=224)
+
+        # Decoder
+        d_base_feat_size = 7  # 16 for 512 input size, and 7 for 224
+        in_out_chan = [
+            [96, 96, 96, 96, 96],
+            [192, 192, 192, 192, 192],
+            [384, 384, 384, 384, 384],
+            [768, 768, 768, 768, 768],
+        ]  # [dim, out_dim, key_dim, value_dim, x2_dim]
+
+
+        self.decoder_3 = MyDecoderLayerLKAFreqEnhancedCat(
+            (d_base_feat_size, d_base_feat_size),
+            in_out_chan[3],
+            decoder_prompt=False,
+            n_class=num_classes)
+
+        self.decoder_2 = MyDecoderLayerLKAFreqEnhancedCat(
+            (d_base_feat_size * 2, d_base_feat_size * 2),
+            in_out_chan[2],
+            decoder_prompt=False,
+            n_class=num_classes)
+        
+        self.decoder_1 = MyDecoderLayerLKAFreqEnhancedCat(
+            (d_base_feat_size * 4, d_base_feat_size * 4),
+            in_out_chan[1],
+            decoder_prompt=False,
+            n_class=num_classes)
+        
+        self.decoder_0 = MyDecoderLayerLKAFreqEnhancedCatAdapt_inter(
+            (d_base_feat_size * 8, d_base_feat_size * 8),
+            in_out_chan[0],
+            n_class=num_classes,
+            decoder_prompt=True,
+            is_last=True)
+
+    def forward(self, x):
+        # ---------------Encoder-------------------------
+        if x.size()[1] == 1:
+            x = x.repeat(1, 3, 1, 1)
+
+        output_enc_3, output_enc_2, output_enc_1, output_enc_0 = self.backbone(x)
+
+        b, c, _, _ = output_enc_3.shape
+        # print(output_enc_3.shape)
+        # ---------------Decoder-------------------------
+        tmp_3 = self.decoder_3(output_enc_3.permute(0, 2, 3, 1).view(b, -1, c))
+        tmp_2 = self.decoder_2(tmp_3, output_enc_2.permute(0, 2, 3, 1))
+        tmp_1 = self.decoder_1(tmp_2, output_enc_1.permute(0, 2, 3, 1))
+        tmp_0 = self.decoder_0(tmp_1, output_enc_0.permute(0, 2, 3, 1))
+
+        return tmp_0
+
 if __name__ == "__main__":
     input0 = torch.rand((1, 3, 224, 224)).cuda(0)
     input = torch.randn((1, 768, 7, 7)).cuda(0)
