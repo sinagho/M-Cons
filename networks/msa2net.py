@@ -1892,7 +1892,7 @@ class MyDecoderLayerLKAFreqEnhancedCatAdapt(nn.Module):
                                              ffn_expansion_factor=2.66, 
                                              bias=False, LayerNorm_type='WithBias')
             
-            self.mlp = nn.Conv2d(int(dim_p**2),int(dim_p),kernel_size=1,bias=False, stride=1, padding=1)
+            self.mlp = nn.Conv2d(int(dim_p*2),int(dim_p),kernel_size=1,bias=False, stride=1)
 
         self.bn1 = nn.BatchNorm2d(num_features = out_dim)
         self.layer_lka_2 = AdaptiveAttentionModule(in_channels=out_dim)
@@ -1940,10 +1940,14 @@ class MyDecoderLayerLKAFreqEnhancedCatAdapt(nn.Module):
             
             if self.decoder_prompt:
                 prompt_layer_1 = self.refiner(refined_feature)
+#                 print(prompt_layer_1)
                 cat_input_prompt = torch.cat([refined_feature, prompt_layer_1], dim= 1)
+#                 print(cat_input_prompt.shape)
                 # fused_map = self.fused(refined_feature, prompt_layer_1)
                 fused_map = self.noise_level1(cat_input_prompt)
+#                 print(fused_map.shape)
                 refined_feature = self.mlp(fused_map).contiguous()
+#                 print(refined_feature.shape)
 
             tran_layer_2 = self.bn2(self.layer_lka_2(self.bn1(refined_feature)))
 
