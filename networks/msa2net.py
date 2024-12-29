@@ -790,9 +790,7 @@ class FrqRefinerEnhanced(nn.Module):
                                                      dim,
                                                      kernel_size=1,
                                                      stride=1
-                                                     ),
-                                          nn.BatchNorm2d(dim),
-                                          nn.GELU())
+                                                     ))
         
     def forward(self, x, H = None, W = None):
         
@@ -898,8 +896,7 @@ class FrequencyPromptFusionEnhanced(nn.Module):
         self.ap_kv = nn.AdaptiveAvgPool2d(1)
         self.kv = nn.Conv2d(dim_bak, dim * 2, kernel_size=1, bias=bias)
 
-        self.project_out = nn.Sequential(nn.Conv2d( dim, dim, kernel_size=1, bias=bias),
-                                         nn.BatchNorm2d(dim))
+        self.project_out = nn.Sequential(nn.Conv2d( dim, dim, kernel_size=1, bias=bias))
 
     def forward(self, feature, prompt_feature):
         b, c1,h,w = feature.shape
@@ -2012,6 +2009,7 @@ class MyDecoderLayerLKAFreqEnhancedCatAdapt_inter(nn.Module):
                                              bias=False, LayerNorm_type='WithBias')
             
             self.mlp = nn.Conv2d(int(dim_p*2),int(dim_p),kernel_size=1,bias=False, stride=1)
+            self.conv_ = nn.Conv2d(int(dim_p), int(dim_p), kernel_size = 3, stride = 1, padding = 1)
 
         self.bn1 = nn.BatchNorm2d(num_features = out_dim)
         self.layer_lka_2 = AdaptiveAttentionModule(in_channels=out_dim)
@@ -2073,7 +2071,7 @@ class MyDecoderLayerLKAFreqEnhancedCatAdapt_inter(nn.Module):
                 # fused_map = self.fused(refined_feature, prompt_layer_1)
                 fused_map = self.noise_level1(cat_input_prompt)
 #                 print(fused_map.shape)
-                refined_feature = self.mlp(fused_map).contiguous()
+                refined_feature = self.conv_(self.mlp(fused_map)).contiguous()
 #                 print(refined_feature.shape)
 
             tran_layer_2 = self.bn2(self.layer_lka_2(self.bn1(refined_feature)))
