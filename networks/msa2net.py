@@ -936,8 +936,8 @@ class SFF(nn.Module):
 
         self.softmax = nn.Softmax(dim=1)
 
-        self.conv1 = nn.Sequential(nn.Conv2d(in_channels,in_channels,1), nn.BatchNorm2d(in_channels))
-        self.conv2 = nn.Sequential(nn.Conv2d(in_channels,in_channels,1), nn.BatchNorm2d(in_channels))
+        self.conv1 = nn.Sequential(nn.Conv2d(in_channels,in_channels,1))
+        self.conv2 = nn.Sequential(nn.Conv2d(in_channels,in_channels,1))
         #self.conv2 = nn.Sequential(
                    # nn.Conv2d(in_channels*2, in_channels * 4, 1, bias=False),
                    # nn.PixelShuffle(2)
@@ -1794,16 +1794,14 @@ class MyDecoderLayerLKAFreqEnhancedCat(nn.Module):
         
         if not is_last:
             self.x1_linear = nn.Linear(x1_dim, out_dim)
-            if self.use_sff:
-                self.skip = SFF(in_channels = out_dim)
+            self.skip = SFF(in_channels = out_dim)
             self.ag_attn_norm = nn.LayerNorm(out_dim)
 
             self.layer_up = PatchExpand(input_resolution=input_size, dim=out_dim, dim_scale=2, norm_layer=norm_layer)
             self.last_layer = None
         else:
             self.x1_linear = nn.Linear(x1_dim, out_dim)
-            if self.use_sff:
-                self.skip = SFF(in_channels = out_dim)
+            self.skip = SFF(in_channels = out_dim)
             self.ag_attn_norm = nn.LayerNorm(out_dim)
 
             self.layer_up = FinalPatchExpand_X4(
@@ -2033,8 +2031,7 @@ class MyDecoderLayerLKAFreqEnhancedCatAdapt_inter(nn.Module):
 
         if not is_last:
             self.x1_linear = nn.Linear(x1_dim, out_dim)
-            if self.use_sff:
-                self.skip = SFF(in_channels = out_dim)
+            self.skip = SFF(in_channels = out_dim)
             #self.ag_attn = MultiScaleGatedAttn(dim=x1_dim)
             self.ag_attn_norm = nn.LayerNorm(out_dim)
 
@@ -2042,8 +2039,7 @@ class MyDecoderLayerLKAFreqEnhancedCatAdapt_inter(nn.Module):
             self.last_layer = None
         else:
             self.x1_linear = nn.Linear(x1_dim, out_dim)
-            if self.use_sff:
-                self.skip = SFF(in_channels = out_dim)
+            self.skip = SFF(in_channels = out_dim)
             self.ag_attn_norm = nn.LayerNorm(out_dim)
 
             self.layer_up = FinalPatchExpand_X4(
@@ -2109,14 +2105,14 @@ class MyDecoderLayerLKAFreqEnhancedCatAdapt_inter(nn.Module):
 
             # print(f'the x1_expand shape is: {x1_expand.shape}\n\t the x2_new shape is: {x2_new.shape}')
             if self.use_sff:
-                cat_linear_x = self.skip(x1_expand, x2_new)
+                cat_linear_x = self.skip(x1_expand, x2_new) + x2_new # B C H W
             else:
                 cat_linear_x = x1_expand + x2_new  # B C H W
 
-            cat_linear_x = cat_linear_x.permute(0, 2, 3, 1)  # B H W C
-            cat_linear_x = self.ag_attn_norm(cat_linear_x)  # B H W C
+#             cat_linear_x = cat_linear_x.permute(0, 2, 3, 1)  # B H W C
+#             cat_linear_x = self.ag_attn_norm(cat_linear_x)  # B H W C
 
-            cat_linear_x = cat_linear_x.permute(0, 3, 1, 2).contiguous()  # B C H W
+#             cat_linear_x = cat_linear_x.permute(0, 3, 1, 2).contiguous()  # B C H W
 
             refined_feature = self.layer_lka_1(cat_linear_x) # Raw Feature
             
