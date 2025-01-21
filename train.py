@@ -9,10 +9,11 @@ import numpy as np
 import torch
 import torch.backends.cudnn as cudnn
 
-from networks.msa2net import  Msa2Net_V3, Msa2Net_V4, Msa2Net_V5, Msa2Net_V6, Msa2Net_V7, Msa2Net_V8, Msa2Net_V9, Msa2Net_V10
+from networks.msa2net import  Msa2Net_V3, Msa2Net_V4, Msa2Net_V5, Msa2Net_V6, Msa2Net_V7, Msa2Net_V8, Msa2Net_V9, Msa2Net_V10, Msa2Net_V11
 from trainer import trainer_synapse
 
 from fvcore.nn import FlopCountAnalysis
+from thop import profile  
 import sys
 
 warnings.filterwarnings("ignore")
@@ -133,6 +134,8 @@ if __name__ == "__main__":
         net = Msa2Net_V9().cuda(0)
     elif args.model_name == "msa2net_v10":
         net = Msa2Net_V10().cuda(0)
+    elif args.model_name == "msa2net_v11":
+        net = Msa2Net_V11().cuda(0)
 
     input = torch.rand((1,3,224,224)).cuda(0)
     n_parameters = sum(p.numel() for p in net.parameters() if p.requires_grad)
@@ -140,7 +143,8 @@ if __name__ == "__main__":
     #model_flops = flops.total()
     print(f"Total trainable parameters: {round(n_parameters * 1e-6, 2)} M")
     #print(f"MAdds: {round(model_flops * 1e-9, 2)} G")
-
+    flops, params = profile(net, inputs=(input,))  
+    print(f"FLOPS: {round(flops * 1e-9, 2)}, Params: {params}")  
     #sys.exit()
 
     trainer = {
