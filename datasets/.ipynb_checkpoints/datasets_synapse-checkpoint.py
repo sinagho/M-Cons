@@ -8,7 +8,7 @@ from scipy.ndimage.interpolation import zoom
 from torch.utils.data import Dataset
 import imgaug as ia
 import imgaug.augmenters as iaa
-
+import monai as m
 
 def mask_to_onehot(mask, ):
     """
@@ -125,4 +125,300 @@ class Synapse_dataset(Dataset):
         if self.norm_y_transform is not None:
             sample['label'] = self.norm_y_transform(sample['label'].copy())
         sample['case_name'] = self.sample_list[idx].strip('\n')
+        return sample
+    
+############################################## Just added for EW-ViT ######## Noise Addition after Normalization and Augmentation ####################################
+class Synapse_dataset_Noisy(Dataset):
+    def __init__(self, base_dir, list_dir, split, img_size, addnoise=False, 
+                 train_std=0.0, train_prob = 0.25,
+                 test_std = 0.05, test_prob = 0.99,
+                 norm_x_transform=None, norm_y_transform=None):
+        
+        self.norm_x_transform = norm_x_transform
+        self.norm_y_transform = norm_y_transform
+        self.split = split
+        self.sample_list = open(os.path.join(list_dir, self.split + '.txt')).readlines()
+        self.data_dir = base_dir
+        self.img_size = img_size
+        
+        ############################################ Noise Configs#########################
+        self.add_noise = addnoise #Boolean 
+        self.train_std = train_std # Standard deviation of Gaussian Noiise (useful for abliation)
+        self.train_prob = train_prob # occurance probability of Noise
+        self.test_std = test_std
+        self.test_prob = test_prob
+        
+        self.img_aug = iaa.SomeOf((0, 4), [
+            iaa.Flipud(0.5, name="Flipud"),
+            iaa.Fliplr(0.5, name="Fliplr"),
+            iaa.AdditiveGaussianNoise(scale=0.005 * 255),
+            iaa.GaussianBlur(sigma=(1.0)),
+            iaa.LinearContrast((0.5, 1.5), per_channel=0.5),
+            iaa.Affine(scale={"x": (0.5, 2), "y": (0.5, 2)}),
+            iaa.Affine(rotate=(-40, 40)),
+            iaa.Affine(shear=(-16, 16)),
+            iaa.PiecewiseAffine(scale=(0.008, 0.03)),
+            iaa.Affine(translate_percent={"x": (-0.2, 0.2), "y": (-0.2, 0.2)})
+        ], random_order=True)
+        
+        # Random Gaussian Noise Method for test and train 
+        self.augmented_noise_train = m.transforms.Compose([m.transforms.RandGaussianNoise(prob = self.train_prob, mean = 0,
+                                                                                    std= self.train_std)])
+        
+        self.augmented_noise_test = m.transforms.Compose([m.transforms.RandGaussianNoise(prob = self.test_prob, mean = 0,
+                                                                                    std = self.test_std)])
+    def __len__(self):
+        return len(self.sample_list)
+
+    def __getitem__(self, idx):
+        if self.split == "train":
+            slice_name = self.sample_list[idx].strip('\n')
+            data_path = os.path.join(self.data_dir, slice_name + '.npz')
+            data = np.load(data_path)
+            image, label = data['image'], data['label']
+            image, label = augment_seg(self.img_aug, image, label)
+            x, y = image.shape
+            if x != self.img_size or y != self.img_size:
+                image = zoom(image, (self.img_size / x, self.img_size / y), order=3)  # why not 3?
+                label = zoom(label, (self.img_size / x, self.img_size / y), order=0)
+
+        else:
+            vol_name = self.sample_list[idx].strip('\n')
+            filepath = self.data_dir + "/{}.npy.h5".format(vol_name)
+            data = h5py.File(filepath)
+            image, label = data['image'][:], data['label'][:]
+
+        sample = {'image': image, 'label': label}
+        if self.norm_x_transform is not None:
+            sample['image'] = self.norm_x_transform(sample['image'].copy())
+            
+            
+        if self.norm_y_transform is not None:
+            sample['label'] = self.norm_y_transform(sample['label'].copy())
+        sample['case_name'] = self.sample_list[idx].strip('\n')
+        
+        if self.add_noise:
+            if self.split == 'train':
+            # Augmenting Gaussian Noise if self.add_noise is True
+                sample['image'] = torch.tensor(self.augmented_noise_train(sample['image']))
+            else:
+                sample['image'] = torch.tensor(self.augmented_noise_test(sample['image']))
+                
+        return sample
+######################################################################################################################################## 
+
+
+############################################## Just added for EW-ViT ######## Noise Addition before Normalization and after Augmentation #######
+class Synapse_dataset_Noisy_cent(Dataset):
+    def __init__(self, base_dir, list_dir, split, img_size, addnoise=False, std=0.0, prob = 0.25, norm_x_transform=None, norm_y_transform=None):
+        self.norm_x_transform = norm_x_transform
+        self.norm_y_transform = norm_y_transform
+        self.split = split
+        self.sample_list = open(os.path.join(list_dir, self.split + '.txt')).readlines()
+        self.data_dir = base_dir
+        self.img_size = img_size
+        
+        
+        self.add_noise = addnoise #Boolean 
+        self.std = std # Standard deviation of Gaussian Noiise (useful for abliation)
+        self.prob = prob # occurance probability of Noise
+        
+        self.img_aug = iaa.SomeOf((0, 4), [
+            iaa.Flipud(0.5, name="Flipud"),
+            iaa.Fliplr(0.5, name="Fliplr"),
+            iaa.AdditiveGaussianNoise(scale=0.005 * 255),
+            iaa.GaussianBlur(sigma=(1.0)),
+            iaa.LinearContrast((0.5, 1.5), per_channel=0.5),
+            iaa.Affine(scale={"x": (0.5, 2), "y": (0.5, 2)}),
+            iaa.Affine(rotate=(-40, 40)),
+            iaa.Affine(shear=(-16, 16)),
+            iaa.PiecewiseAffine(scale=(0.008, 0.03)),
+            iaa.Affine(translate_percent={"x": (-0.2, 0.2), "y": (-0.2, 0.2)})
+        ], random_order=True)
+        
+        # Random Gaussian Noise Method
+        self.augmented_noise = m.transforms.Compose([m.transforms.RandGaussianNoise(prob = self.prob, mean = 0, std = self.std)])
+        
+    def __len__(self):
+        return len(self.sample_list)
+
+    def __getitem__(self, idx):
+        if self.split == "train":
+            slice_name = self.sample_list[idx].strip('\n')
+            data_path = os.path.join(self.data_dir, slice_name + '.npz')
+            data = np.load(data_path)
+            image, label = data['image'], data['label']
+            image, label = augment_seg(self.img_aug, image, label)
+            x, y = image.shape
+            if x != self.img_size or y != self.img_size:
+                image = zoom(image, (self.img_size / x, self.img_size / y), order=3)  # why not 3?
+                label = zoom(label, (self.img_size / x, self.img_size / y), order=0)
+
+        else:
+            vol_name = self.sample_list[idx].strip('\n')
+            filepath = self.data_dir + "/{}.npy.h5".format(vol_name)
+            data = h5py.File(filepath)
+            image, label = data['image'][:], data['label'][:]
+            
+
+        sample = {'image': image, 'label': label}
+        
+        if self.add_noise:
+            # Augmenting Gaussian Noise if self.add_noise is True
+            sample['image'] = torch.tensor(self.augmented_noise(sample['image'])).numpy()
+            
+            
+        if self.norm_x_transform is not None:
+            sample['image'] = self.norm_x_transform(sample['image'].copy())
+            
+            
+        if self.norm_y_transform is not None:
+            sample['label'] = self.norm_y_transform(sample['label'].copy())
+            
+        sample['case_name'] = self.sample_list[idx].strip('\n')
+        
+        return sample
+######################################################################################################################################## 
+
+
+
+############################################## Just added for EW-ViT ######## Noise Addition before Normalization and Augmentation #######
+class Synapse_dataset_Noisy_bef(Dataset):
+    def __init__(self, base_dir, list_dir, split, img_size,
+                 addnoise=False, test_std = 0.05, test_prob = 0.99,
+                 norm_x_transform=None, norm_y_transform=None):
+        self.norm_x_transform = norm_x_transform
+        self.norm_y_transform = norm_y_transform
+        self.split = split
+        self.sample_list = open(os.path.join(list_dir, self.split + '.txt')).readlines()
+        self.data_dir = base_dir
+        self.img_size = img_size
+        
+        ############################################ Noise Configs#########################
+        self.add_noise = addnoise #Boolean 
+        self.test_std = test_std
+        self.test_prob = test_prob
+        
+        self.img_aug = iaa.SomeOf((0, 4), [
+            iaa.Flipud(0.5, name="Flipud"),
+            iaa.Fliplr(0.5, name="Fliplr"),
+            iaa.AdditiveGaussianNoise(scale=0.005 * 255),
+            iaa.GaussianBlur(sigma=(1.0)),
+            iaa.LinearContrast((0.5, 1.5), per_channel=0.5),
+            iaa.Affine(scale={"x": (0.5, 2), "y": (0.5, 2)}),
+            iaa.Affine(rotate=(-40, 40)),
+            iaa.Affine(shear=(-16, 16)),
+            iaa.PiecewiseAffine(scale=(0.008, 0.03)),
+            iaa.Affine(translate_percent={"x": (-0.2, 0.2), "y": (-0.2, 0.2)})
+        ], random_order=True)
+        
+        # Random Gaussian Noise Method
+        
+        self.augmented_noise_test = m.transforms.Compose([m.transforms.RandGaussianNoise(prob = self.test_prob,
+                                                                                          mean = 0,
+                                                                                          std = self.test_std)])
+    def __len__(self):
+        return len(self.sample_list)
+
+    def __getitem__(self, idx):
+        if self.split == "train":
+            slice_name = self.sample_list[idx].strip('\n')
+            data_path = os.path.join(self.data_dir, slice_name + '.npz')
+            data = np.load(data_path)
+            image, label = data['image'], data['label']
+                
+                
+            image, label = augment_seg(self.img_aug, image, label)
+            x, y = image.shape
+            if x != self.img_size or y != self.img_size:
+                image = zoom(image, (self.img_size / x, self.img_size / y), order=3)  # why not 3?
+                label = zoom(label, (self.img_size / x, self.img_size / y), order=0)
+
+        else:
+            vol_name = self.sample_list[idx].strip('\n')
+            filepath = self.data_dir + "/{}.npy.h5".format(vol_name)
+            data = h5py.File(filepath)
+            image, label = data['image'][:], data['label'][:]
+            
+            if self.add_noise:
+                image = torch.tensor(self.augmented_noise_test(image)).numpy()
+                
+                
+        sample = {'image': image, 'label': label}
+            
+            
+        if self.norm_x_transform is not None:
+            sample['image'] = self.norm_x_transform(sample['image'].copy())
+            
+            
+        if self.norm_y_transform is not None:
+            sample['label'] = self.norm_y_transform(sample['label'].copy())
+            
+        sample['case_name'] = self.sample_list[idx].strip('\n')
+        
+        return sample
+######################################################################################################################################## 
+
+
+class SynapseDatasetFast(Dataset):
+    def __init__(self, base_dir, list_dir, split, img_size, norm_x_transform=None, norm_y_transform=None):
+        self.norm_x_transform = norm_x_transform
+        self.norm_y_transform = norm_y_transform
+        self.split = split
+        self.sample_list = [d.strip('\n') for d in open(os.path.join(list_dir, self.split+'.txt')).readlines()]
+        self.data_dir = base_dir
+        self.img_size = img_size
+
+        self.img_aug = iaa.SomeOf((0,4),[
+            iaa.Flipud(0.5, name="Flipud"),
+            iaa.Fliplr(0.5, name="Fliplr"),
+            iaa.AdditiveGaussianNoise(scale=0.005 * 255),
+            iaa.GaussianBlur(sigma=(1.0)),
+            iaa.LinearContrast((0.5, 1.5), per_channel=0.5),
+            iaa.Affine(scale={"x": (0.5, 2), "y": (0.5, 2)}),
+            iaa.Affine(rotate=(-40, 40)),
+            iaa.Affine(shear=(-16, 16)),
+            iaa.PiecewiseAffine(scale=(0.008, 0.03)),
+            iaa.Affine(translate_percent={"x": (-0.2, 0.2), "y": (-0.2, 0.2)})
+        ], random_order=True)
+        
+        self.__load_all_data()
+        
+    
+    def __load_all_data(self):
+        self.images, self.labels = [], []
+        for sample in tqdm(self.sample_list, desc="loading all slices"):
+            data_path = os.path.join(self.data_dir, sample+'.npz')
+            data = np.load(data_path)
+            image, label = data['image'], data['label']
+            
+            self.images.append(image)
+            self.labels.append(label)
+
+
+    def __len__(self):
+        return len(self.sample_list)
+
+    
+    def __getitem__(self, idx):
+        if self.split == "train":
+            image, label = self.images[idx], self.labels[idx]
+            image, label = augment_seg(self.img_aug, image, label)
+            x, y = image.shape
+            if x != self.img_size or y != self.img_size:
+                image = zoom(image, (self.img_size / x, self.img_size / y), order=3)  # why not 3?
+                label = zoom(label, (self.img_size / x, self.img_size / y), order=0)
+
+        else:
+            vol_name = self.sample_list[idx]
+            filepath = self.data_dir + "/{}.npy.h5".format(vol_name)
+            data = h5py.File(filepath)
+            image, label = data['image'][:], data['label'][:]
+
+        sample = {'image': image, 'label': label}
+        if self.norm_x_transform is not None:
+            sample['image'] = self.norm_x_transform(sample['image'].copy())
+        if self.norm_y_transform is not None:
+            sample['label'] = self.norm_y_transform(sample['label'].copy())
+        sample['case_name'] = self.sample_list[idx]
         return sample

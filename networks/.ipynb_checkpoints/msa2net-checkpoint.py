@@ -589,11 +589,11 @@ class MultiSpectralAttentionLayer(torch.nn.Module):
             # In the ImageNet models, this line will never be triggered. 
             # This is for compatibility in instance segmentation and object detection.
         y = self.dct_layer(x_pooled)
-        print("initial y is:", y.shape)
+        #print("initial y is:", y.shape)
         # print(y.shape)
 
         y = self.fc(y).view(n, c, 1, 1)
-        print("fced y is: ", y.shape)
+        #print("fced y is: ", y.shape)
         # return x * y.expand_as(x)
         return y
 class MultiSpectralDCTLayer(nn.Module):
@@ -688,22 +688,22 @@ class FreqLightWeightPromptGenBlock(nn.Module):
 
         w = (W // 2) + 1
         emb = self.dct_layer(x)
-        print("DCT ed Shape is : ", emb.shape)
+        # print("DCT ed Shape is : ", emb.shape)
         # emb = x.mean(dim=(-2,-1)) # B, C (Simple GAP)
 
-        prompt_weights = F.softmax(self.linear_layer(emb),dim=1) # B, C , 1, 1
-        print("prompt weight is : ",prompt_weights.shape)
+        prompt_weights = F.softmax(self.linear_layer(emb),dim=1) # B, C' , 1, 1
+        # print("prompt weight is : ",prompt_weights.shape)
 
         # print(self.prompt_param.unsqueeze(0).repeat(B,1,1,1,1,1, 1).squeeze(1).shape)
         prompt = prompt_weights.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1) * self.prompt_param.unsqueeze(0).repeat(B,1,1,1,1,1, 1).squeeze(1)
 
         # p2 = self.prompt_param.unsqueeze(0).repeat(B,1,1,1,1,1).squeeze(1)
         # print(p2.shape)
-        print("prompt is : ", prompt.shape)
+        # print("prompt is : ", prompt.shape)
         prompt = torch.sum(prompt,dim=1)
-        print("prompt summed is :", prompt.shape)
+        # print("prompt summed is :", prompt.shape)
         prompt = F.interpolate(prompt,(H,w, 2),mode="trilinear") # B, N, C, (W//2 + 1)
-        print("prompt interpolated shape is : ", prompt.shape)
+        # print("prompt interpolated shape is : ", prompt.shape)
         prompt = self.conv3x3(prompt)
         
 
@@ -804,36 +804,36 @@ class FrqRefinerEnhanced(nn.Module):
         
         x = F.interpolate(x, size=(H, W), mode='bicubic')
         y = torch.fft.rfft2(x.to(torch.float32).cuda())
-        print("FFTed y shape is :",y.shape)
+        # print("FFTed y shape is :",y.shape)
 
         y_imag = y.imag
 
-        print("y_imag shape is: ",y_imag.shape)
+        # print("y_imag shape is: ",y_imag.shape)
         y_real = y.real
-        print("y_real shape is: ",y_real.shape)
+        # print("y_real shape is: ",y_real.shape)
         y_f = torch.cat([y_real, y_imag], dim=1)
 
-        print("concatenated y is : ", y_f.shape)
+        # print("concatenated y is : ", y_f.shape)
 
         ## Weight Making ##
  
         weight = torch.complex(self.complex_weights(x)[..., 0],self.complex_weights(x)[..., 1])
-        print("freq weight shape is : ", weight.shape)
+        # print("freq weight shape is : ", weight.shape)
         ########
         # print(self.complex_weights(x)[..., 0].shape)
         # print(weight.shape)
         # print("shape is : ", weight.shape)
         
         y_att = self.body(y_f)
-        print("y gated shape is :", y_att.shape)
+        # print("y gated shape is :", y_att.shape)
 
         y_f = y_f * y_att
-        print("y_f recalibrated shape is : ", y_f.shape)
+        # print("y_f recalibrated shape is : ", y_f.shape)
         
         y_real, y_imag = torch.chunk(y_f, 2, dim=1)
         # print(y_real.shape, y_imag.shape)
         y = torch.complex(y_real, y_imag)
-        print("y complex shape is : ", y.shape)
+        # print("y complex shape is : ", y.shape)
         y = y * weight
         y = torch.fft.irfft2(y, s=(H, W))
         y = self.conv_enhancer(y)
@@ -1019,9 +1019,9 @@ class SFA(nn.Module):
         feats_U = f_r + f_m
         # feats_S = self.avg_pool(feats_U)
         feats_S = self.guidance(feats_U)
-        print("feat_S initial", feats_S.shape)
+        # print("feat_S initial", feats_S.shape)
         feats_Z = self.conv_du(feats_S)
-        print("feat_S reduced", feats_Z.shape)
+        # print("feat_S reduced", feats_Z.shape)
 
         a_r = self.softmax(self.fcs[0](feats_Z))
         a_m = self.softmax(self.fcs[1](feats_Z))
