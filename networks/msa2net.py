@@ -6,11 +6,16 @@ from einops import rearrange
 from einops.layers.torch import Rearrange
 from torch.nn import functional as F
 
-# from .networks.segformer import *
+from .networks.segformer import *
 from .model_utils import AttentionModule as AdaptiveAttentionModule
 from .segformer import *
 from .masag import MultiScaleGatedAttn
 from .merit_lib.networks import MaxViT4Out_Small
+
+# from model_utils import AttentionModule as AdaptiveAttentionModule
+# from segformer import *
+# from masag import MultiScaleGatedAttn
+# from merit_lib.networks import MaxViT4Out_Small
 # from segformer import *
 # from attentions import MultiScaleGatedAttn
 
