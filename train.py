@@ -9,7 +9,17 @@ import numpy as np
 import torch
 import torch.backends.cudnn as cudnn
 
-from networks.msa2net import  Msa2Net_V3, Msa2Net_V4, Msa2Net_V5, Msa2Net_V6, Msa2Net_V7, Msa2Net_V8, Msa2Net_V9, Msa2Net_V10, Msa2Net_V11
+from networks.msa2net import (
+    Msa2Net_V3, 
+    Msa2Net_V4, 
+    Msa2Net_V5, 
+    Msa2Net_V6, 
+    Msa2Net_V7, 
+    Msa2Net_V8, 
+    Msa2Net_V9, 
+    Msa2Net_V10, 
+    Msa2Net_V11
+)
 from trainer import trainer_synapse
 
 from fvcore.nn import FlopCountAnalysis
@@ -73,6 +83,10 @@ parser.add_argument("--tag", help="tag of experiment")
 parser.add_argument("--eval", action="store_true", help="Perform evaluation only")
 parser.add_argument("--throughput", action="store_true", help="Test throughput only")
 
+parser.add_argument("--use_sff", action="store_true", help="Use SFF")
+parser.add_argument("--use_fan", action="store_true", help="Use FAN")
+parser.add_argument("--decoder_prompt", action="store_true", help="Use Decoder Prompt")
+
 args = parser.parse_args()
 
 
@@ -135,7 +149,11 @@ if __name__ == "__main__":
     elif args.model_name == "msa2net_v10":
         net = Msa2Net_V10().cuda(0)
     elif args.model_name == "msa2net_v11":
-        net = Msa2Net_V11().cuda(0)
+        net = Msa2Net_V11(
+            use_sff=args.use_sff,
+            use_fan=args.use_fan,
+            decoder_prompt=args.decoder_prompt,
+        ).cuda(0)
 
     input = torch.rand((1,3,224,224)).cuda(0)
     n_parameters = sum(p.numel() for p in net.parameters() if p.requires_grad)
